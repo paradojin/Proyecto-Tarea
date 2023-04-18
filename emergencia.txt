@@ -1,0 +1,126 @@
+package main
+
+import (
+	"context"
+	"log"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+)
+
+var (
+	client     *mongo.Client
+	collection *mongo.Collection
+)
+
+type Flight struct {
+	ID           string    `json:"id" bson:"_id,omitempty"`
+	FlightNumber string    `json:"flight_number" bson:"flight_number,omitempty"`
+	From         string    `json:"from" bson:"from,omitempty"`
+	To           string    `json:"to" bson:"to,omitempty"`
+	Date         time.Time `json:"date" bson:"date,omitempty"`
+}
+
+func main() {
+	// Get environment variables
+	server := os.Getenv("SERVER")
+	port := os.Getenv("PORT")
+	connectionString := os.Getenv("CONNECTION_STRING")
+
+	// Connect to MongoDB
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var err error
+	client, err = mongo.Connect(ctx, options.Client().ApplyURI(connectionString))
+	if err != nil {
+		log.Fatal(err)
+	}
+	collection = client.Database("aerolinea").Collection("flights")
+
+	// Set up Gin-Gonic router
+	r := gin.Default()
+
+	// Define routes
+	r.GET("/flights", getFlights)
+	r.GET("/flights/:id", getFlight)
+	r.POST("/flights", createFlight)
+
+	// Start server
+	log.Printf("Server listening on %s:%s", server, port)
+	log.Fatal(http.ListenAndServe(server+":"+port, r))
+}
+
+func getFlights(c *gin.Context) {
+	var flights []Flight
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cur, err := collection.Find(ctx, nil)
+	if err != nil {
+		log.Println(err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "error getting flights"})
+		return
+	}
+	defer cur.Close(ctx)
+
+	for cur.Next(ctx) {
+		var flight Flight
+		if err := cur.Decode(&flight); err != nil {
+			log.Println(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "error decoding flights"})
+			return
+		}
+		flights = append(flights, flight)
+	}
+
+	if err := cur.Err(); err != nil {
+		log.Println(err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "error getting flights"})
+		return
+	}
+
+	c.JSON(http.StatusOK, flights)
+}
+
+func getFlight(c *gin.Context) {
+	id := c.Param("id")
+
+	var flight Flight
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := collection.FindOne(ctx, Flight{ID: id}).Decode(&flight)
+	if err != nil {
+		log.Println(err)
+		c.JSON(http.StatusNotFound, gin.H{"error": "flight not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, flight)
+}
+
+func createFlight(c *gin.Context) {
+	var flight Flight
+	if err := c.ShouldBindJSON(&flight); err != nil {
+		log.Println(err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := collection.InsertOne(ctx, flight)
+	if err != nil {
+		log.Println(err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "error creating flight"})
+		return
+	}
+
+	flight.ID = result.InsertedID.(
